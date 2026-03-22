@@ -174,8 +174,18 @@ export default function App() {
   const [contextText, setContextText] = useState('');
   const [isRoleSwapped, setIsRoleSwapped] = useState(false);
   const [liveAnalysis, setLiveAnalysis] = useState({ sentiment: 50, hint: 'Waiting for you to speak...', factCheck: null as string | null });
+  const [roundAnnouncement, setRoundAnnouncement] = useState<string | null>(null);
   const analysisTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const announceRound = (text: string) => {
+    setRoundAnnouncement(text);
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.1;
+    utterance.pitch = 0.9;
+    window.speechSynthesis.speak(utterance);
+    setTimeout(() => setRoundAnnouncement(null), 3000);
+  };
 
   const getPhaseTime = (phase: DebatePhase | null) => {
     return phase === 'OPENING' ? 120 : 60;
@@ -200,19 +210,25 @@ export default function App() {
   }, [isSessionActive, mode, isSpeaking, debatePhase]);
 
   const advancePhase = () => {
+    audioQueue.current = [];
+    isPlaying.current = false;
     if (debatePhase === 'OPENING') {
       setDebatePhase('CROSS_EXAM');
       setTimeLeft(60);
+      announceRound("Round 2: Cross Examination.");
       liveService.current?.sendText("System: The Opening Statements phase is over. We are now moving to Cross-Examination. Please ask your first direct question to the user.");
     } else if (debatePhase === 'CROSS_EXAM') {
       setDebatePhase('AUDIENCE');
       setTimeLeft(60);
+      announceRound("Round 3: Audience Q and A.");
       liveService.current?.sendText("System: Cross-Examination is over. We are now moving to Audience Q&A. Please act as an audience member and ask a challenging question directed at BOTH sides.");
     } else if (debatePhase === 'AUDIENCE') {
       setDebatePhase('CLOSING');
       setTimeLeft(60);
+      announceRound("Final Round: Closing Statements.");
       liveService.current?.sendText("System: Audience Q&A is over. We are now moving to Closing Statements. The user will go first. Acknowledge this and wait for their statement.");
     } else if (debatePhase === 'CLOSING') {
+      announceRound("Debate Concluded.");
       stopSession();
     }
   };
@@ -243,11 +259,11 @@ export default function App() {
     analysisTimeoutRef.current = setTimeout(async () => {
       try {
         const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
-        const recent = transcript.slice(-4).map(t => `${t.role}: ${t.text}`).join('\n');
+        const recent = transcript.slice(-4).map(t => `${t.role === 'user' ? 'HUMAN USER' : 'AI OPPONENT'}: ${t.text}`).join('\n');
         const prompt = `Analyze this ongoing ${mode === 'HOT_TAKE' ? 'debate' : 'interview'}.
         CRITICAL INSTRUCTIONS:
-        1. sentiment (0-100): Do NOT guess vibes. Calculate this based strictly on visible causes: Did the user answer the direct question? Did they use fact support? Did they interrupt? Are they aligned with the audience? 50 is neutral.
-        2. hint: A short, punchy 1-sentence tactical coaching tip for the 'user' (e.g., "They are dodging, press them on the statistics").
+        1. sentiment (0-100): Do NOT guess vibes. Calculate this based strictly on visible causes: Did the HUMAN USER answer the direct question? Did they use fact support? Did they interrupt? Are they aligned with the audience? 50 is neutral.
+        2. hint: A short, punchy 1-sentence tactical coaching tip for the HUMAN USER (e.g., "They are dodging, press them on the statistics"). DO NOT give advice to the AI OPPONENT. If the AI OPPONENT just spoke, tell the HUMAN USER how to counter it.
         3. factCheck: EXTREMELY STRICT THRESHOLD. You must pass these gates before triggering:
            - Gate 1: Extract the exact claim made in the last 2 messages.
            - Gate 2: Is it highly specific and externally verifiable? (Numbers, dates, quotes). If it's framing/ideology, ABSTAIN (return null).
@@ -376,6 +392,10 @@ export default function App() {
       setTimeLeft(mode === 'HOT_TAKE' ? 120 : 60);
       setIsRoleSwapped(false);
       setLiveAnalysis({ sentiment: 50, hint: 'Waiting for you to speak...', factCheck: null });
+      
+      if (mode === 'HOT_TAKE') {
+        announceRound("Round 1: Opening Statements.");
+      }
     } catch (err) {
       console.error("Failed to start session:", err);
     }
@@ -837,6 +857,22 @@ We are currently in Phase 1: OPENING STATEMENTS. Wait for the user to speak firs
 
   const renderActiveSession = () => (
     <div className="fixed inset-0 bg-black z-50 flex flex-col items-center justify-center p-6">
+      {/* Round Announcement Overlay */}
+      <AnimatePresence>
+        {roundAnnouncement && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.8, y: 50 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 1.2, filter: 'blur(10px)' }}
+            className="absolute inset-0 flex items-center justify-center z-[100] pointer-events-none bg-black/60 backdrop-blur-sm"
+          >
+            <h2 className="text-6xl md:text-8xl font-black text-rose-500 uppercase tracking-tighter text-center drop-shadow-[0_0_30px_rgba(244,63,94,0.8)]">
+              {roundAnnouncement}
+            </h2>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Sentiment Bar */}
       <div className="absolute top-0 left-0 right-0 h-2 bg-zinc-900 flex">
         <motion.div 
@@ -927,7 +963,11 @@ We are currently in Phase 1: OPENING STATEMENTS. Wait for the user to speak firs
           {!isSpeaking && (
             <div className="flex justify-center gap-4">
               <button 
-                onClick={() => liveService.current?.sendText("System: The user has finished speaking. Please respond.")}
+                onClick={() => {
+                  audioQueue.current = [];
+                  isPlaying.current = false;
+                  liveService.current?.sendText("System: The user has finished speaking. Please respond immediately.");
+                }}
                 className="inline-flex items-center gap-2 px-6 py-3 bg-rose-600 hover:bg-rose-700 rounded-full text-sm font-bold text-white transition-colors"
               >
                 End Turn <CheckCircle2 size={16} />
