@@ -161,6 +161,7 @@ export default function App() {
   const [selectedScenario, setSelectedScenario] = useState<PressScenario | null>(null);
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isWaitingForAI, setIsWaitingForAI] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [transcript, setTranscript] = useState<{ role: string; text: string }[]>([]);
   const [scoreCard, setScoreCard] = useState<ScoreCardData | null>(null);
@@ -193,25 +194,32 @@ export default function App() {
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
-    if (isSessionActive && mode === 'HOT_TAKE' && !isSpeaking) {
+    if (isSessionActive && mode === 'HOT_TAKE' && !isSpeaking && !isWaitingForAI) {
       interval = setInterval(() => {
         setTimeLeft((prev) => {
           if (prev <= 1) {
+            setIsWaitingForAI(true);
             liveService.current?.sendText("System: The user's time for this turn is up. Please respond to their points.");
             return getPhaseTime(debatePhase);
           }
           return prev - 1;
         });
       }, 1000);
-    } else if (isSpeaking) {
+    } else if (isSpeaking || isWaitingForAI) {
       setTimeLeft(getPhaseTime(debatePhase));
     }
     return () => clearInterval(interval);
-  }, [isSessionActive, mode, isSpeaking, debatePhase]);
+  }, [isSessionActive, mode, isSpeaking, isWaitingForAI, debatePhase]);
 
   const advancePhase = () => {
     audioQueue.current = [];
+    if (currentAudioNode.current) {
+      currentAudioNode.current.stop();
+      currentAudioNode.current = null;
+    }
     isPlaying.current = false;
+    setIsSpeaking(false);
+    setIsWaitingForAI(true);
     if (debatePhase === 'OPENING') {
       setDebatePhase('CROSS_EXAM');
       setTimeLeft(60);
@@ -235,6 +243,7 @@ export default function App() {
 
   const liveService = useRef<GeminiLiveService | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
+  const currentAudioNode = useRef<AudioBufferSourceNode | null>(null);
   const workletNode = useRef<AudioWorkletNode | null>(null);
   const source = useRef<MediaStreamAudioSourceNode | null>(null);
   const audioQueue = useRef<Int16Array[]>([]);
@@ -363,7 +372,12 @@ export default function App() {
 
           if (message.serverContent?.interrupted) {
             audioQueue.current = [];
+            if (currentAudioNode.current) {
+              currentAudioNode.current.stop();
+              currentAudioNode.current = null;
+            }
             isPlaying.current = false;
+            setIsSpeaking(false);
           }
         },
         onClose: () => setIsSessionActive(false),
@@ -391,6 +405,7 @@ export default function App() {
       setScoreCard(null);
       setTimeLeft(mode === 'HOT_TAKE' ? 120 : 60);
       setIsRoleSwapped(false);
+      setIsWaitingForAI(true);
       setLiveAnalysis({ sentiment: 50, hint: 'Waiting for you to speak...', factCheck: null });
       
       if (mode === 'HOT_TAKE') {
@@ -410,6 +425,7 @@ export default function App() {
 
     isPlaying.current = true;
     setIsSpeaking(true);
+    setIsWaitingForAI(false);
     const pcmData = audioQueue.current.shift()!;
     // Live API returns audio at 24000Hz
     const buffer = audioContext.current.createBuffer(1, pcmData.length, 24000);
@@ -419,9 +435,15 @@ export default function App() {
     }
 
     const node = audioContext.current.createBufferSource();
+    currentAudioNode.current = node;
     node.buffer = buffer;
     node.connect(audioContext.current.destination);
-    node.onended = playNextInQueue;
+    node.onended = () => {
+      if (currentAudioNode.current === node) {
+        currentAudioNode.current = null;
+      }
+      playNextInQueue();
+    };
     node.start();
   };
 
@@ -430,8 +452,13 @@ export default function App() {
     workletNode.current?.disconnect();
     source.current?.disconnect();
     audioContext.current?.close();
+    if (currentAudioNode.current) {
+      currentAudioNode.current.stop();
+      currentAudioNode.current = null;
+    }
     setIsSessionActive(false);
     setIsSpeaking(false);
+    setIsWaitingForAI(false);
     
     if (transcript.length > 2) {
       judgeSession();
@@ -955,17 +982,23 @@ We are currently in Phase 1: OPENING STATEMENTS. Wait for the user to speak firs
         
         <div className="mt-12 text-center">
           <h2 className="text-3xl font-bold mb-4">
-            {isSpeaking ? 'Gemini is speaking...' : 'Your turn. Speak now.'}
+            {isSpeaking ? 'Gemini is speaking...' : isWaitingForAI ? 'Gemini is thinking...' : 'Your turn. Speak now.'}
           </h2>
           <p className="text-zinc-500 max-w-md mx-auto mb-6">
             {mode === 'HOT_TAKE' ? 'Defend your take with logic and passion.' : 'Stay calm, speak clearly, and answer the question.'}
           </p>
-          {!isSpeaking && (
+          {!isSpeaking && !isWaitingForAI && (
             <div className="flex justify-center gap-4">
               <button 
                 onClick={() => {
                   audioQueue.current = [];
+                  if (currentAudioNode.current) {
+                    currentAudioNode.current.stop();
+                    currentAudioNode.current = null;
+                  }
                   isPlaying.current = false;
+                  setIsSpeaking(false);
+                  setIsWaitingForAI(true);
                   liveService.current?.sendText("System: The user has finished speaking. Please respond immediately.");
                 }}
                 className="inline-flex items-center gap-2 px-6 py-3 bg-rose-600 hover:bg-rose-700 rounded-full text-sm font-bold text-white transition-colors"
