@@ -1,0 +1,7 @@
+{
+  "name": "The Hot Seat",
+  "description": "A high-stakes verbal arena for debating hot takes and surviving grueling interviews with real-time AI voice.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
