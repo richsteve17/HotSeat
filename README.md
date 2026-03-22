@@ -4,6 +4,13 @@ A real-time, voice-driven application powered by the **Gemini Live API** that he
 
 ## ✨ Features
 
+### ⚡ Advanced AI Features (New!)
+* **📄 Context Upload**: Paste your resume, a press release, or upload a `.txt` file before a session. The AI will read it and grill you specifically on your own material!
+* **📈 Live Audience Sentiment Dial**: A dynamic, real-time meter that shifts based on *visible, measurable actions* (answering direct questions, citing facts, avoiding interruptions) rather than just "vibes".
+* **💡 Live Earpiece (Real-Time Coach)**: A secondary AI constantly analyzes the transcript and whispers 1-sentence tactical hints to you (e.g., "They are dodging the question, press them on the statistics!").
+* **🚨 Real-Time Fact-Checking (BS Meter)**: A highly disciplined fact-checker with a strict gating mechanism. It only triggers on highly specific, verifiable claims (numbers, dates, quotes) and abstains on debatable framing. Silence is better than fake certainty.
+* **🔄 Role Swap Curveball**: In the Hot Take Arena, click the "Role Swap" button at any time to force the AI to argue *your* side, while you take *theirs*.
+
 ### 🥊 Hot Take Arena (Structured Debate)
 Engage in formal, Intelligence Squared-style debates against an AI opponent that dynamically adapts to your arguments.
 * **4 Structured Phases**:
@@ -29,7 +36,7 @@ Step into the hot seat and face realistic, high-pressure interview scenarios.
 * **High-Performance Audio Pipeline**: Utilizes `AudioWorkletNode` for off-main-thread audio processing, preventing UI jank during intense sessions.
 * **Full Transcriptions**: Captures and displays both AI and User speech transcripts in real-time.
 * **Voice Visualizer**: Real-time visual feedback for speaking and listening states.
-* **Post-Session Scorecard**: Get detailed feedback on your performance, including scores for Persuasiveness, Logic, Tone, and your "Best Line" of the session.
+* **Post-Session Scorecard**: Get brutally honest, highly specific feedback tied to concrete actions in the transcript. The rubric strictly penalizes "confidence theater" (charismatic non-answers) and maintains stable, objective core judgment across all personas and scenarios.
 
 ## 🚀 Getting Started
 

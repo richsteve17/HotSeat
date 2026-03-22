@@ -12,7 +12,12 @@ import {
   Star,
   CheckCircle2,
   XCircle,
-  RefreshCw
+  RefreshCw,
+  Activity,
+  MessageSquareWarning,
+  FileText,
+  AlertTriangle,
+  Upload
 } from 'lucide-react';
 import { AppMode, HotTakeCategory, PressScenario, ScoreCardData, DebatePhase } from './types';
 import { VoiceVisualizer, VoiceControls } from './components/VoiceInterface';
@@ -166,6 +171,10 @@ export default function App() {
   const [displayedTopics, setDisplayedTopics] = useState<string[]>([]);
   const [timeLeft, setTimeLeft] = useState(120);
   const [debatePhase, setDebatePhase] = useState<DebatePhase | null>(null);
+  const [contextText, setContextText] = useState('');
+  const [isRoleSwapped, setIsRoleSwapped] = useState(false);
+  const [liveAnalysis, setLiveAnalysis] = useState({ sentiment: 50, hint: 'Waiting for you to speak...', factCheck: null as string | null });
+  const analysisTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const getPhaseTime = (phase: DebatePhase | null) => {
     return phase === 'OPENING' ? 120 : 60;
@@ -225,6 +234,60 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!isSessionActive || transcript.length < 2) return;
+
+    if (analysisTimeoutRef.current) clearTimeout(analysisTimeoutRef.current);
+
+    analysisTimeoutRef.current = setTimeout(async () => {
+      try {
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+        const recent = transcript.slice(-4).map(t => `${t.role}: ${t.text}`).join('\n');
+        const prompt = `Analyze this ongoing ${mode === 'HOT_TAKE' ? 'debate' : 'interview'}.
+        CRITICAL INSTRUCTIONS:
+        1. sentiment (0-100): Do NOT guess vibes. Calculate this based strictly on visible causes: Did the user answer the direct question? Did they use fact support? Did they interrupt? Are they aligned with the audience? 50 is neutral.
+        2. hint: A short, punchy 1-sentence tactical coaching tip for the 'user' (e.g., "They are dodging, press them on the statistics").
+        3. factCheck: EXTREMELY STRICT THRESHOLD. You must pass these gates before triggering:
+           - Gate 1: Extract the exact claim made in the last 2 messages.
+           - Gate 2: Is it highly specific and externally verifiable? (Numbers, dates, quotes). If it's framing/ideology, ABSTAIN (return null).
+           - Gate 3: Does enough objective evidence exist to check it? If no, ABSTAIN.
+           If ALL gates pass, return the fact-check string. Otherwise, return null. "No trigger" is the expected outcome for most messages. Silence is better than fake certainty.
+        
+        Transcript:
+        ${recent}`;
+
+        const response = await ai.models.generateContent({
+          model: "gemini-3-flash-preview",
+          contents: prompt,
+          config: {
+            tools: [{ googleSearch: {} }],
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                sentiment: { type: Type.NUMBER },
+                hint: { type: Type.STRING },
+                factCheck: { type: Type.STRING, nullable: true }
+              }
+            }
+          }
+        });
+        const data = JSON.parse(response.text);
+        setLiveAnalysis(prev => ({
+          sentiment: data.sentiment ?? prev.sentiment,
+          hint: data.hint || prev.hint,
+          factCheck: data.factCheck !== undefined ? data.factCheck : prev.factCheck
+        }));
+      } catch (err) {
+        console.error("Live analysis failed", err);
+      }
+    }, 3000);
+
+    return () => {
+      if (analysisTimeoutRef.current) clearTimeout(analysisTimeoutRef.current);
+    };
+  }, [transcript, isSessionActive, mode]);
+
   const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
     let binary = '';
     const bytes = new Uint8Array(buffer);
@@ -237,7 +300,13 @@ export default function App() {
 
   const startSession = async (instruction: string) => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        } 
+      });
       audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       
       await audioContext.current.audioWorklet.addModule('/audio-processor.js');
@@ -304,6 +373,8 @@ export default function App() {
       setTranscript([]);
       setScoreCard(null);
       setTimeLeft(mode === 'HOT_TAKE' ? 120 : 60);
+      setIsRoleSwapped(false);
+      setLiveAnalysis({ sentiment: 50, hint: 'Waiting for you to speak...', factCheck: null });
     } catch (err) {
       console.error("Failed to start session:", err);
     }
@@ -351,19 +422,27 @@ export default function App() {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
       const prompt = `
-        You are a world-class judge for a ${mode === 'HOT_TAKE' ? 'debate' : 'press interview'}.
-        Analyze the following transcript and provide a score card.
+        You are a world-class, highly consistent judge for a ${mode === 'HOT_TAKE' ? 'debate' : 'press interview'}.
+        Analyze the following transcript and provide a highly specific, actionable score card.
         
-        CRITICAL: Use the googleSearch tool to fact-check any specific claims made by either side during the transcript. If someone lied or used fake stats, penalize them in the feedback!
+        CORE JUDGMENT PRINCIPLES:
+        1. Separate "delivered forcefully" from "actually addressed the point". Do NOT reward "confidence theater" or charismatic non-answers. If they dodged the question but sounded good, penalize the dodge heavily.
+        2. Maintain stable, objective core judgment regardless of the specific persona or scenario. The truth and logic do not change based on the hat you are wearing. Apply mode-specific flavor on top of a rock-solid logical foundation.
+        
+        CRITICAL: Do NOT provide generic feedback like "Persuasiveness 82". Your feedback MUST be tied to concrete actions in the transcript. 
+        Example of good feedback: "You answered directly 6/9 times, used 3 concrete examples, got pinned twice on contradictions."
+        Example of bad feedback: "You spoke well and had good points."
+        
+        Also, use the googleSearch tool to fact-check any specific claims made by either side. If someone lied or used fake stats, explicitly call it out in the feedback.
         
         Transcript:
         ${transcript.map(t => `${t.role}: ${t.text}`).join('\n')}
         
         Return a JSON object with:
         - score: number (0-100)
-        - metrics: array of { label: string, value: number (0-100), feedback: string }
-        - summary: string
-        - bestLine: string (optional)
+        - metrics: array of { label: string (e.g., "Substance over Style", "Directness", "Evidence"), value: number (0-100), feedback: string (Highly specific, citing exact counts or instances) }
+        - summary: string (A brutal, honest assessment of their performance, explicitly noting if they relied on confidence theater)
+        - bestLine: string (The exact quote of their strongest moment, optional)
       `;
 
       const response = await ai.models.generateContent({
@@ -457,6 +536,78 @@ export default function App() {
     </div>
   );
 
+  const renderContextInput = (type: 'HOT_TAKE' | 'PRESS_PASS') => {
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const text = event.target?.result as string;
+        setContextText(prev => prev ? prev + '\n\n' + text : text);
+      };
+      reader.readAsText(file);
+      
+      // Reset input so the same file can be uploaded again if needed
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    };
+
+    const templates = type === 'HOT_TAKE' ? [
+      { label: 'Debate Prep', text: 'My Core Argument: \nKey Evidence/Examples: \nBiggest vulnerability in my argument: ' },
+      { label: 'Academic Defense', text: 'Thesis Topic: \nMain Findings: \nAnticipated Criticisms: ' }
+    ] : [
+      { label: 'Job Interview', text: 'Role applying for: \nCurrent background: \nKey strengths to highlight: \nWeaknesses/Gaps they might ask about: ' },
+      { label: 'Product Pitch', text: 'Product/Company Name: \nElevator Pitch: \nTarget Audience: \nPotential criticisms/risks: ' },
+      { label: 'Crisis PR', text: 'The Crisis/Issue: \nOur Official Stance: \nInformation we cannot share yet: ' }
+    ];
+
+    return (
+      <div className={`mb-8 ${type === 'HOT_TAKE' ? 'p-6 bg-zinc-900 border border-zinc-800 rounded-2xl' : ''}`}>
+        <div className="flex flex-col xl:flex-row xl:justify-between xl:items-end mb-3 gap-2">
+          <label className="block text-sm font-bold text-zinc-400 flex items-center gap-2">
+            <FileText size={16} /> Background Context (Optional)
+          </label>
+          <div className="flex flex-wrap items-center gap-2">
+            <input 
+              type="file" 
+              accept=".txt,.md,.csv" 
+              className="hidden" 
+              ref={fileInputRef}
+              onChange={handleFileUpload}
+            />
+            <button 
+              onClick={() => fileInputRef.current?.click()}
+              className={`flex items-center gap-1 text-xs px-3 py-1 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-full text-zinc-300 transition-colors ${type === 'HOT_TAKE' ? 'hover:border-rose-500/50 hover:text-rose-400' : 'hover:border-emerald-500/50 hover:text-emerald-400'}`}
+            >
+              <Upload size={12} /> Upload File (.txt)
+            </button>
+            <div className="w-px h-4 bg-zinc-700 mx-1"></div>
+            <span className="text-xs text-zinc-500 py-1">Templates:</span>
+            {templates.map(t => (
+              <button 
+                key={t.label}
+                onClick={() => setContextText(t.text)}
+                className={`text-xs px-3 py-1 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-full text-zinc-300 transition-colors ${type === 'HOT_TAKE' ? 'hover:border-rose-500/50 hover:text-rose-400' : 'hover:border-emerald-500/50 hover:text-emerald-400'}`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <textarea
+          value={contextText}
+          onChange={(e) => setContextText(e.target.value)}
+          placeholder="Paste your resume, press release, or click a template above to fill in the blanks..."
+          className={`w-full h-32 ${type === 'HOT_TAKE' ? 'bg-zinc-800 border-zinc-700' : 'bg-zinc-900 border-zinc-800'} border rounded-xl px-4 py-3 text-white focus:outline-none transition-colors resize-none ${type === 'HOT_TAKE' ? 'focus:border-rose-500' : 'focus:border-emerald-500'}`}
+        />
+      </div>
+    );
+  };
+
   const renderHotTakeSelection = () => (
     <div className="max-w-4xl mx-auto pt-12 px-6">
       <button onClick={() => setMode('HOME')} className="flex items-center gap-2 text-zinc-500 hover:text-white mb-8 transition-colors">
@@ -490,6 +641,8 @@ export default function App() {
             exit={{ opacity: 0, y: 20 }}
             className="mt-12"
           >
+            {renderContextInput('HOT_TAKE')}
+
             <div className="flex justify-between items-center mb-6">
               <h3 className="text-2xl font-bold">Pick a Topic</h3>
               <button 
@@ -510,6 +663,7 @@ export default function App() {
                     setDebatePhase('OPENING');
                     startSession(`You are participating in a structured, formal debate (Intelligence Squared style). 
 Topic: "${topic}"
+Context/Background Info: "${contextText}"
 You MUST take the OPPOSITE side of whatever the user argues. 
 You will act as both the opponent and occasionally the moderator/audience.
 
@@ -548,6 +702,7 @@ We are currently in Phase 1: OPENING STATEMENTS. Wait for the user to speak firs
               setDebatePhase('OPENING');
               startSession(`You are participating in a structured, formal debate (Intelligence Squared style). 
 Topic: "${customTopic}"
+Context/Background Info: "${contextText}"
 You MUST take the OPPOSITE side of whatever the user argues. 
 You will act as both the opponent and occasionally the moderator/audience.
 
@@ -646,9 +801,11 @@ We are currently in Phase 1: OPENING STATEMENTS. Wait for the user to speak firs
                 />
               </div>
               
+              {renderContextInput('PRESS_PASS')}
+              
               <button 
                 disabled={!pressRole.trim() || !pressInterviewer.trim()}
-                onClick={() => startSession(`You are in Press Pass mode. Scenario: ${selectedScenario.name}. The user is playing the role of: "${pressRole}". You are playing the role of the interviewer: "${pressInterviewer}". Difficulty: ${selectedScenario.difficulty}. ${selectedScenario.description} Be highly realistic to the specific interviewer's style, mannerisms, and typical questions. Follow up aggressively on weak answers. Start by introducing the show/setting in character and asking the first question.`)}
+                onClick={() => startSession(`You are in Press Pass mode. Scenario: ${selectedScenario.name}. The user is playing the role of: "${pressRole}". You are playing the role of the interviewer: "${pressInterviewer}". Difficulty: ${selectedScenario.difficulty}. ${selectedScenario.description} Context/Background Info: "${contextText}" Be highly realistic to the specific interviewer's style, mannerisms, and typical questions. Follow up aggressively on weak answers. Start by introducing the show/setting in character and asking the first question.`)}
                 className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:hover:bg-emerald-600 rounded-xl font-bold transition-colors flex items-center justify-center gap-2"
               >
                 Enter the Hot Seat <Mic size={18} />
@@ -681,6 +838,45 @@ We are currently in Phase 1: OPENING STATEMENTS. Wait for the user to speak firs
 
   const renderActiveSession = () => (
     <div className="fixed inset-0 bg-black z-50 flex flex-col items-center justify-center p-6">
+      {/* Sentiment Bar */}
+      <div className="absolute top-0 left-0 right-0 h-2 bg-zinc-900 flex">
+        <motion.div 
+          className="h-full bg-gradient-to-r from-rose-500 via-amber-500 to-emerald-500"
+          animate={{ width: `${liveAnalysis.sentiment}%` }}
+          transition={{ type: 'spring', bounce: 0.2 }}
+        />
+      </div>
+      <div className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-2 px-4 py-1 rounded-full bg-zinc-900/80 backdrop-blur border border-zinc-800 text-xs font-bold text-zinc-400">
+        <Activity size={14} className={liveAnalysis.sentiment > 50 ? 'text-emerald-500' : 'text-rose-500'} />
+        Crowd Sentiment: {liveAnalysis.sentiment}%
+      </div>
+
+      {/* Fact Check Alert */}
+      <AnimatePresence>
+        {liveAnalysis.factCheck && (
+          <motion.div 
+            initial={{ opacity: 0, x: 50 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 50 }}
+            className="absolute top-20 right-8 w-80 p-4 rounded-xl bg-rose-950/80 backdrop-blur border border-rose-500/50 text-rose-200 shadow-2xl z-50"
+          >
+            <div className="flex items-center gap-2 font-bold text-rose-400 mb-2">
+              <AlertTriangle size={16} /> BS Meter Alert
+            </div>
+            <p className="text-sm leading-relaxed">{liveAnalysis.factCheck}</p>
+            <button onClick={() => setLiveAnalysis(prev => ({...prev, factCheck: null}))} className="mt-3 text-xs text-rose-400 hover:text-rose-300 underline">Dismiss</button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Coach Earpiece */}
+      <div className="absolute bottom-8 right-8 w-72 p-4 rounded-xl bg-indigo-950/80 backdrop-blur border border-indigo-500/50 text-indigo-200 shadow-2xl z-50">
+        <div className="flex items-center gap-2 font-bold text-indigo-400 mb-2">
+          <MessageSquareWarning size={16} /> Live Coach
+        </div>
+        <p className="text-sm leading-relaxed italic">"{liveAnalysis.hint}"</p>
+      </div>
+
       <div className="absolute top-8 left-8">
         <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-zinc-900 border border-zinc-800">
           <div className={`w-2 h-2 rounded-full ${isSessionActive ? 'bg-rose-500 animate-pulse' : 'bg-zinc-700'}`} />
@@ -710,12 +906,14 @@ We are currently in Phase 1: OPENING STATEMENTS. Wait for the user to speak firs
               {Math.floor(timeLeft / 60).toString().padStart(2, '0')}:{(timeLeft % 60).toString().padStart(2, '0')}
             </div>
             
-            <button 
-              onClick={advancePhase} 
-              className="mt-6 px-6 py-3 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-xl text-sm font-bold transition-colors flex items-center gap-2"
-            >
-              {debatePhase === 'CLOSING' ? 'Finish Debate' : 'Advance to Next Phase'} <Play size={14} />
-            </button>
+            <div className="flex gap-4 mt-6">
+              <button 
+                onClick={advancePhase} 
+                className="px-6 py-3 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-xl text-sm font-bold transition-colors flex items-center gap-2"
+              >
+                {debatePhase === 'CLOSING' ? 'Finish Debate' : 'Next Round'} <Play size={14} />
+              </button>
+            </div>
           </div>
         )}
         <VoiceVisualizer isListening={!isSpeaking} isSpeaking={isSpeaking} volume={0} />
@@ -724,9 +922,31 @@ We are currently in Phase 1: OPENING STATEMENTS. Wait for the user to speak firs
           <h2 className="text-3xl font-bold mb-4">
             {isSpeaking ? 'Gemini is speaking...' : 'Your turn. Speak now.'}
           </h2>
-          <p className="text-zinc-500 max-w-md mx-auto">
+          <p className="text-zinc-500 max-w-md mx-auto mb-6">
             {mode === 'HOT_TAKE' ? 'Defend your take with logic and passion.' : 'Stay calm, speak clearly, and answer the question.'}
           </p>
+          {!isSpeaking && (
+            <div className="flex justify-center gap-4">
+              <button 
+                onClick={() => liveService.current?.sendText("System: The user has finished speaking. Please respond.")}
+                className="inline-flex items-center gap-2 px-6 py-3 bg-rose-600 hover:bg-rose-700 rounded-full text-sm font-bold text-white transition-colors"
+              >
+                End Turn <CheckCircle2 size={16} />
+              </button>
+              {mode === 'HOT_TAKE' && (
+                <button 
+                  onClick={() => {
+                    setIsRoleSwapped(!isRoleSwapped);
+                    liveService.current?.sendText(`System: ROLE SWAP! You must now argue the user's original side, and the user will argue your original side. Acknowledge this immediately and make a point for your new side.`);
+                  }}
+                  className={`inline-flex items-center gap-2 px-6 py-3 rounded-full text-sm font-bold transition-colors ${isRoleSwapped ? 'bg-amber-600 hover:bg-amber-700 text-white' : 'bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700'}`}
+                >
+                  <RefreshCw size={16} className={isRoleSwapped ? 'animate-spin' : ''} />
+                  {isRoleSwapped ? 'Role Swapped!' : 'Role Swap Curveball'}
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="mt-12 w-full max-h-48 overflow-y-auto space-y-4 px-4 scrollbar-hide">
@@ -754,7 +974,7 @@ We are currently in Phase 1: OPENING STATEMENTS. Wait for the user to speak firs
           onClick={stopSession}
           className="px-8 py-3 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-400 font-bold hover:text-white transition-colors"
         >
-          End Session & Get Score
+          End Game & Get Score
         </button>
       </div>
     </div>
