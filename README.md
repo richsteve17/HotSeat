@@ -104,3 +104,4 @@ Step into the hot seat and face realistic, high-pressure interview scenarios.
 * **Robust Base64 Encoding**: Implemented a chunked array buffer to Base64 encoder, preventing call stack size exceeded errors on large audio buffers.
 * **Live State Management**: Fixed stale closure issues in audio processing callbacks using React refs for real-time mute toggling.
 * **Comprehensive Transcriptions**: Enabled and integrated both `inputAudioTranscription` and `outputAudioTranscription` to ensure the judging pipeline has full context of both sides of the conversation.
+* **Gemini SDK Update**: Updated the `sendTurnComplete` method to use `sendRealtimeInput` instead of the deprecated `sendClientContent` method, ensuring the AI correctly waits for the user to finish speaking before responding.

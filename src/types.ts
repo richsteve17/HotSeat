@@ -34,4 +34,6 @@ export interface ScoreCardData {
   }[];
   summary: string;
   bestLine?: string;
+  initialPoll?: { for: number; against: number; undecided: number };
+  finalPoll?: { for: number; against: number; undecided: number };
 }

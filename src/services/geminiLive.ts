@@ -16,7 +16,8 @@ export class GeminiLiveService {
   }
 
   async connect(config: LiveSessionConfig) {
-    this.session = await this.ai.live.connect({
+    console.log("Attempting to connect to live session...");
+    const session = await this.ai.live.connect({
       model: "gemini-2.5-flash-native-audio-preview-12-2025",
       config: {
         responseModalities: [Modality.AUDIO],
@@ -26,14 +27,28 @@ export class GeminiLiveService {
         systemInstruction: config.systemInstruction,
         inputAudioTranscription: {},
         outputAudioTranscription: {},
+        realtimeInputConfig: {
+          automaticActivityDetection: { disabled: true }
+        }
       },
       callbacks: {
         onopen: () => console.log("Live session opened"),
-        onmessage: config.onMessage,
-        onclose: config.onClose,
-        onerror: config.onError,
+        onmessage: (msg) => {
+          console.log("Message received");
+          config.onMessage(msg);
+        },
+        onclose: () => {
+          console.log("Live session closed");
+          config.onClose();
+        },
+        onerror: (err) => {
+          console.error("Live Error:", err);
+          config.onError(err);
+        },
       },
     });
+    console.log("Connected to live session");
+    this.session = session;
     return this.session;
   }
 
@@ -48,6 +63,12 @@ export class GeminiLiveService {
   async sendText(text: string) {
     if (this.session) {
       await this.session.sendRealtimeInput({ text });
+    }
+  }
+
+  async sendTurnComplete() {
+    if (this.session) {
+      await this.session.sendRealtimeInput({ text: "System: The user has finished speaking. Please respond." });
     }
   }
 

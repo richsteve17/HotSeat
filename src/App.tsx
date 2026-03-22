@@ -165,6 +165,7 @@ export default function App() {
   const [isMuted, setIsMuted] = useState(false);
   const [transcript, setTranscript] = useState<{ role: string; text: string }[]>([]);
   const [scoreCard, setScoreCard] = useState<ScoreCardData | null>(null);
+  const [initialPoll, setInitialPoll] = useState<{for: number, against: number, undecided: number} | null>(null);
   const [isJudging, setIsJudging] = useState(false);
   const [customTopic, setCustomTopic] = useState('');
   const [pressRole, setPressRole] = useState('');
@@ -194,22 +195,25 @@ export default function App() {
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
-    if (isSessionActive && mode === 'HOT_TAKE' && !isSpeaking && !isWaitingForAI) {
+    if (isSessionActive && mode === 'HOT_TAKE' && !isWaitingForAI && !isSpeaking) {
       interval = setInterval(() => {
         setTimeLeft((prev) => {
           if (prev <= 1) {
-            setIsWaitingForAI(true);
-            liveService.current?.sendText("System: The user's time for this turn is up. Please respond to their points.");
-            return getPhaseTime(debatePhase);
+            return 0;
           }
           return prev - 1;
         });
       }, 1000);
-    } else if (isSpeaking || isWaitingForAI) {
-      setTimeLeft(getPhaseTime(debatePhase));
     }
     return () => clearInterval(interval);
-  }, [isSessionActive, mode, isSpeaking, isWaitingForAI, debatePhase]);
+  }, [isSessionActive, mode, isWaitingForAI, isSpeaking]);
+
+  useEffect(() => {
+    if (timeLeft === 0 && isSessionActive && mode === 'HOT_TAKE') {
+      advancePhase();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeLeft, isSessionActive, mode]);
 
   const advancePhase = () => {
     audioQueue.current = [];
@@ -225,16 +229,19 @@ export default function App() {
       setTimeLeft(60);
       announceRound("Round 2: Cross Examination.");
       liveService.current?.sendText("System: The Opening Statements phase is over. We are now moving to Cross-Examination. Please ask your first direct question to the user.");
+      liveService.current?.sendTurnComplete();
     } else if (debatePhase === 'CROSS_EXAM') {
       setDebatePhase('AUDIENCE');
       setTimeLeft(60);
       announceRound("Round 3: Audience Q and A.");
       liveService.current?.sendText("System: Cross-Examination is over. We are now moving to Audience Q&A. Please act as an audience member and ask a challenging question directed at BOTH sides.");
+      liveService.current?.sendTurnComplete();
     } else if (debatePhase === 'AUDIENCE') {
       setDebatePhase('CLOSING');
       setTimeLeft(60);
       announceRound("Final Round: Closing Statements.");
       liveService.current?.sendText("System: Audience Q&A is over. We are now moving to Closing Statements. The user will go first. Acknowledge this and wait for their statement.");
+      liveService.current?.sendTurnComplete();
     } else if (debatePhase === 'CLOSING') {
       announceRound("Debate Concluded.");
       stopSession();
@@ -325,6 +332,7 @@ export default function App() {
   };
 
   const startSession = async (instruction: string) => {
+    console.log("startSession called with instruction:", instruction);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
@@ -333,14 +341,18 @@ export default function App() {
           autoGainControl: true
         } 
       });
+      console.log("Got media stream");
       audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       
       await audioContext.current.audioWorklet.addModule('/audio-processor.js');
+      console.log("Audio worklet added");
 
       liveService.current = new GeminiLiveService();
+      console.log("GeminiLiveService created");
       await liveService.current.connect({
         systemInstruction: instruction,
         onMessage: (message) => {
+          console.log("Message received in App.tsx");
           if (message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data) {
             const base64Audio = message.serverContent.modelTurn.parts[0].inlineData.data;
             const binaryString = window.atob(base64Audio);
@@ -354,20 +366,30 @@ export default function App() {
           
           if (message.serverContent?.modelTurn?.parts?.[0]?.text) {
             const text = message.serverContent.modelTurn.parts[0].text;
-            setTranscript(prev => [...prev, { role: 'ai', text }]);
+            setTranscript(prev => {
+              const last = prev[prev.length - 1];
+              if (last && last.role === 'ai') {
+                // Append chunk to the last AI message
+                const newTranscript = [...prev];
+                newTranscript[newTranscript.length - 1] = { ...last, text: last.text + text };
+                return newTranscript;
+              }
+              return [...prev, { role: 'ai', text }];
+            });
           }
 
-          // Handle user transcriptions if available
-          const msgAny = message as any;
-          if (msgAny.clientContent?.turns?.[0]?.parts?.[0]?.text) {
-            const text = msgAny.clientContent.turns[0].parts[0].text;
-            setTranscript(prev => [...prev, { role: 'user', text }]);
-          } else if (msgAny.inputTranscription) {
-            setTranscript(prev => [...prev, { role: 'user', text: msgAny.inputTranscription }]);
-          }
-          
-          if (msgAny.outputTranscription) {
-            setTranscript(prev => [...prev, { role: 'ai', text: msgAny.outputTranscription }]);
+          if (message.serverContent?.inputTranscription?.text) {
+            const text = message.serverContent.inputTranscription.text;
+            setTranscript(prev => {
+              const last = prev[prev.length - 1];
+              if (last && last.role === 'user') {
+                // Append chunk to the last user message
+                const newTranscript = [...prev];
+                newTranscript[newTranscript.length - 1] = { ...last, text: last.text + text };
+                return newTranscript;
+              }
+              return [...prev, { role: 'user', text }];
+            });
           }
 
           if (message.serverContent?.interrupted) {
@@ -379,10 +401,15 @@ export default function App() {
             isPlaying.current = false;
             setIsSpeaking(false);
           }
+
+          if (message.serverContent?.turnComplete) {
+            setIsWaitingForAI(false);
+          }
         },
         onClose: () => setIsSessionActive(false),
         onError: (err) => console.error("Live Error:", err),
       });
+      console.log("Connected to GeminiLiveService");
 
       source.current = audioContext.current.createMediaStreamSource(stream);
       workletNode.current = new AudioWorkletNode(audioContext.current, 'audio-processor');
@@ -405,11 +432,18 @@ export default function App() {
       setScoreCard(null);
       setTimeLeft(mode === 'HOT_TAKE' ? 120 : 60);
       setIsRoleSwapped(false);
-      setIsWaitingForAI(true);
+      setIsWaitingForAI(mode === 'HOT_TAKE' ? false : true);
       setLiveAnalysis({ sentiment: 50, hint: 'Waiting for you to speak...', factCheck: null });
       
       if (mode === 'HOT_TAKE') {
+        const forVal = Math.floor(Math.random() * 30) + 25; // 25-54
+        const againstVal = Math.floor(Math.random() * 30) + 25; // 25-54
+        const undecidedVal = 100 - forVal - againstVal;
+        setInitialPoll({ for: forVal, against: againstVal, undecided: Math.max(0, undecidedVal) });
         announceRound("Round 1: Opening Statements.");
+      } else {
+        setInitialPoll(null);
+        liveService.current?.sendTurnComplete();
       }
     } catch (err) {
       console.error("Failed to start session:", err);
@@ -475,14 +509,22 @@ export default function App() {
         
         CORE JUDGMENT PRINCIPLES:
         1. Separate "delivered forcefully" from "actually addressed the point". Do NOT reward "confidence theater" or charismatic non-answers. If they dodged the question but sounded good, penalize the dodge heavily.
-        2. Maintain stable, objective core judgment regardless of the specific persona or scenario. The truth and logic do not change based on the hat you are wearing. Apply mode-specific flavor on top of a rock-solid logical foundation.
-        
-        CRITICAL: Do NOT provide generic feedback like "Persuasiveness 82". Your feedback MUST be tied to concrete actions in the transcript. 
+        2. Maintain stable, objective core judgment regardless of the specific persona or scenario. The truth and logic do not change based on the hat you are wearing. Apply mode-specific flavor on top of a rock-solid logical        CRITICAL: Do NOT provide generic feedback like "Persuasiveness 82". Your feedback MUST be tied to concrete actions in the transcript. 
         Example of good feedback: "You answered directly 6/9 times, used 3 concrete examples, got pinned twice on contradictions."
         Example of bad feedback: "You spoke well and had good points."
         
         Also, use the googleSearch tool to fact-check any specific claims made by either side. If someone lied or used fake stats, explicitly call it out in the feedback.
         
+        ${mode === 'HOT_TAKE' && initialPoll ? `
+        INTELLIGENCE SQUARED SCORING:
+        The initial audience sentiment before the debate was:
+        - For (User's side): ${initialPoll.for}%
+        - Against (AI's side): ${initialPoll.against}%
+        - Undecided: ${initialPoll.undecided}%
+        
+        Based on the transcript, determine the final audience sentiment. The winner is the side that swayed the most percentage points (the largest positive delta). Include the final poll numbers in your response.
+        ` : ''}
+
         Transcript:
         ${transcript.map(t => `${t.role}: ${t.text}`).join('\n')}
         
@@ -491,6 +533,7 @@ export default function App() {
         - metrics: array of { label: string (e.g., "Substance over Style", "Directness", "Evidence"), value: number (0-100), feedback: string (Highly specific, citing exact counts or instances) }
         - summary: string (A brutal, honest assessment of their performance, explicitly noting if they relied on confidence theater)
         - bestLine: string (The exact quote of their strongest moment, optional)
+        ${mode === 'HOT_TAKE' ? `- finalPoll: object with { for: number, against: number, undecided: number } (must sum to 100)` : ''}
       `;
 
       const response = await ai.models.generateContent({
@@ -516,14 +559,28 @@ export default function App() {
                 }
               },
               summary: { type: Type.STRING },
-              bestLine: { type: Type.STRING }
+              bestLine: { type: Type.STRING },
+              finalPoll: {
+                type: Type.OBJECT,
+                properties: {
+                  for: { type: Type.NUMBER },
+                  against: { type: Type.NUMBER },
+                  undecided: { type: Type.NUMBER }
+                }
+              }
             }
           }
         }
       });
-
       const data = JSON.parse(response.text);
-      setScoreCard(data);
+      setScoreCard({
+        score: data.score,
+        metrics: data.metrics,
+        summary: data.summary,
+        bestLine: data.bestLine,
+        initialPoll: initialPoll || undefined,
+        finalPoll: data.finalPoll
+      });
     } catch (err) {
       console.error("Judging failed:", err);
     } finally {
@@ -559,7 +616,7 @@ export default function App() {
               <Zap size={24} />
             </div>
             <h2 className="text-3xl font-bold mb-2">Hot Take Arena</h2>
-            <p className="text-zinc-400">Pick a side. AI argues the opposite. 3 rounds of pure verbal warfare.</p>
+            <p className="text-zinc-400">Pick a side. AI argues the opposite. 4 phases of pure verbal warfare.</p>
           </div>
         </motion.button>
 
@@ -713,6 +770,11 @@ Context/Background Info: "${contextText}"
 You MUST take the OPPOSITE side of whatever the user argues. 
 You will act as both the opponent and occasionally the moderator/audience.
 
+CRITICAL RULES FOR INTERACTION:
+1. DO NOT INTERRUPT. The user may pause to think. Wait patiently.
+2. ONLY respond when you receive the system message: "System: The user has finished speaking."
+3. Keep your arguments concise and punchy.
+
 The debate has 4 phases:
 1. OPENING STATEMENTS: The user gives their opening statement. You listen, then give your opening statement.
 2. CROSS-EXAMINATION: Direct back-and-forth. Keep responses concise and end with a pointed question.
@@ -751,6 +813,11 @@ Topic: "${customTopic}"
 Context/Background Info: "${contextText}"
 You MUST take the OPPOSITE side of whatever the user argues. 
 You will act as both the opponent and occasionally the moderator/audience.
+
+CRITICAL RULES FOR INTERACTION:
+1. DO NOT INTERRUPT. The user may pause to think. Wait patiently.
+2. ONLY respond when you receive the system message: "System: The user has finished speaking."
+3. Keep your arguments concise and punchy.
 
 The debate has 4 phases:
 1. OPENING STATEMENTS: The user gives their opening statement. You listen, then give your opening statement.
@@ -851,7 +918,11 @@ We are currently in Phase 1: OPENING STATEMENTS. Wait for the user to speak firs
               
               <button 
                 disabled={!pressRole.trim() || !pressInterviewer.trim()}
-                onClick={() => startSession(`You are in Press Pass mode. Scenario: ${selectedScenario.name}. The user is playing the role of: "${pressRole}". You are playing the role of the interviewer: "${pressInterviewer}". Difficulty: ${selectedScenario.difficulty}. ${selectedScenario.description} Context/Background Info: "${contextText}" Be highly realistic to the specific interviewer's style, mannerisms, and typical questions. Follow up aggressively on weak answers. Start by introducing the show/setting in character and asking the first question.`)}
+                onClick={() => startSession(`You are in Press Pass mode. Scenario: ${selectedScenario.name}. The user is playing the role of: "${pressRole}". You are playing the role of the interviewer: "${pressInterviewer}". Difficulty: ${selectedScenario.difficulty}. ${selectedScenario.description} Context/Background Info: "${contextText}" 
+CRITICAL RULES FOR INTERACTION:
+1. DO NOT INTERRUPT. The user may pause to think. Wait patiently.
+2. ONLY respond when you receive the system message: "System: The user has finished speaking."
+Be highly realistic to the specific interviewer's style, mannerisms, and typical questions. Follow up aggressively on weak answers. Start by introducing the show/setting in character and asking the first question.`)}
                 className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:hover:bg-emerald-600 rounded-xl font-bold transition-colors flex items-center justify-center gap-2"
               >
                 Enter the Hot Seat <Mic size={18} />
@@ -1000,6 +1071,7 @@ We are currently in Phase 1: OPENING STATEMENTS. Wait for the user to speak firs
                   setIsSpeaking(false);
                   setIsWaitingForAI(true);
                   liveService.current?.sendText("System: The user has finished speaking. Please respond immediately.");
+                  liveService.current?.sendTurnComplete();
                 }}
                 className="inline-flex items-center gap-2 px-6 py-3 bg-rose-600 hover:bg-rose-700 rounded-full text-sm font-bold text-white transition-colors"
               >
@@ -1010,6 +1082,7 @@ We are currently in Phase 1: OPENING STATEMENTS. Wait for the user to speak firs
                   onClick={() => {
                     setIsRoleSwapped(!isRoleSwapped);
                     liveService.current?.sendText(`System: ROLE SWAP! You must now argue the user's original side, and the user will argue your original side. Acknowledge this immediately and make a point for your new side.`);
+                    liveService.current?.sendTurnComplete();
                   }}
                   className={`inline-flex items-center gap-2 px-6 py-3 rounded-full text-sm font-bold transition-colors ${isRoleSwapped ? 'bg-amber-600 hover:bg-amber-700 text-white' : 'bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700'}`}
                 >
@@ -1073,6 +1146,39 @@ We are currently in Phase 1: OPENING STATEMENTS. Wait for the user to speak firs
               <p className="text-zinc-400">Final Score Card</p>
             </div>
           </div>
+
+          {scoreCard?.initialPoll && scoreCard?.finalPoll && (
+            <div className="mb-8 p-6 bg-zinc-800/50 border border-zinc-700/50 rounded-2xl">
+              <h3 className="text-sm font-bold uppercase tracking-widest text-zinc-500 mb-4">Intelligence Squared Polling</h3>
+              <div className="grid grid-cols-2 gap-6">
+                <div>
+                  <div className="text-xs text-zinc-400 mb-2">BEFORE DEBATE</div>
+                  <div className="flex justify-between text-sm mb-1"><span className="text-emerald-500">For</span><span>{scoreCard.initialPoll.for}%</span></div>
+                  <div className="flex justify-between text-sm mb-1"><span className="text-rose-500">Against</span><span>{scoreCard.initialPoll.against}%</span></div>
+                  <div className="flex justify-between text-sm"><span className="text-zinc-500">Undecided</span><span>{scoreCard.initialPoll.undecided}%</span></div>
+                </div>
+                <div>
+                  <div className="text-xs text-zinc-400 mb-2">AFTER DEBATE</div>
+                  <div className="flex justify-between text-sm mb-1">
+                    <span className="text-emerald-500">For</span>
+                    <span className="font-bold">{scoreCard.finalPoll.for}% <span className="text-xs font-normal">({scoreCard.finalPoll.for - scoreCard.initialPoll.for > 0 ? '+' : ''}{scoreCard.finalPoll.for - scoreCard.initialPoll.for})</span></span>
+                  </div>
+                  <div className="flex justify-between text-sm mb-1">
+                    <span className="text-rose-500">Against</span>
+                    <span className="font-bold">{scoreCard.finalPoll.against}% <span className="text-xs font-normal">({scoreCard.finalPoll.against - scoreCard.initialPoll.against > 0 ? '+' : ''}{scoreCard.finalPoll.against - scoreCard.initialPoll.against})</span></span>
+                  </div>
+                  <div className="flex justify-between text-sm"><span className="text-zinc-500">Undecided</span><span>{scoreCard.finalPoll.undecided}%</span></div>
+                </div>
+              </div>
+              <div className="mt-4 pt-4 border-t border-zinc-700/50 text-center">
+                <span className="font-bold text-amber-500">
+                  {scoreCard.finalPoll.for - scoreCard.initialPoll.for > scoreCard.finalPoll.against - scoreCard.initialPoll.against 
+                    ? "🏆 You won the debate by swaying more of the audience!" 
+                    : "💀 The AI won the debate by swaying more of the audience."}
+                </span>
+              </div>
+            </div>
+          )}
 
           <div className="space-y-6 mb-8">
             {scoreCard?.metrics.map((m, i) => (
