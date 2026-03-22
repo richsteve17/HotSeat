@@ -175,6 +175,7 @@ export default function App() {
   const [isRoleSwapped, setIsRoleSwapped] = useState(false);
   const [liveAnalysis, setLiveAnalysis] = useState({ sentiment: 50, hint: 'Waiting for you to speak...', factCheck: null as string | null });
   const analysisTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const getPhaseTime = (phase: DebatePhase | null) => {
     return phase === 'OPENING' ? 120 : 60;
@@ -537,8 +538,6 @@ export default function App() {
   );
 
   const renderContextInput = (type: 'HOT_TAKE' | 'PRESS_PASS') => {
-    const fileInputRef = useRef<HTMLInputElement>(null);
-
     const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
