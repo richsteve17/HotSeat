@@ -209,10 +209,15 @@ export default function App() {
 
   const liveService = useRef<GeminiLiveService | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
-  const processor = useRef<ScriptProcessorNode | null>(null);
+  const workletNode = useRef<AudioWorkletNode | null>(null);
   const source = useRef<MediaStreamAudioSourceNode | null>(null);
   const audioQueue = useRef<Int16Array[]>([]);
   const isPlaying = useRef(false);
+  const isMutedRef = useRef(isMuted);
+
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+  }, [isMuted]);
 
   useEffect(() => {
     return () => {
@@ -220,11 +225,23 @@ export default function App() {
     };
   }, []);
 
+  const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  };
+
   const startSession = async (instruction: string) => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       
+      await audioContext.current.audioWorklet.addModule('/audio-processor.js');
+
       liveService.current = new GeminiLiveService();
       await liveService.current.connect({
         systemInstruction: instruction,
@@ -245,6 +262,19 @@ export default function App() {
             setTranscript(prev => [...prev, { role: 'ai', text }]);
           }
 
+          // Handle user transcriptions if available
+          const msgAny = message as any;
+          if (msgAny.clientContent?.turns?.[0]?.parts?.[0]?.text) {
+            const text = msgAny.clientContent.turns[0].parts[0].text;
+            setTranscript(prev => [...prev, { role: 'user', text }]);
+          } else if (msgAny.inputTranscription) {
+            setTranscript(prev => [...prev, { role: 'user', text: msgAny.inputTranscription }]);
+          }
+          
+          if (msgAny.outputTranscription) {
+            setTranscript(prev => [...prev, { role: 'ai', text: msgAny.outputTranscription }]);
+          }
+
           if (message.serverContent?.interrupted) {
             audioQueue.current = [];
             isPlaying.current = false;
@@ -255,22 +285,20 @@ export default function App() {
       });
 
       source.current = audioContext.current.createMediaStreamSource(stream);
-      processor.current = audioContext.current.createScriptProcessor(4096, 1, 1);
+      workletNode.current = new AudioWorkletNode(audioContext.current, 'audio-processor');
       
-      processor.current.onaudioprocess = (e) => {
-        if (isMuted) return;
-        const inputData = e.inputBuffer.getChannelData(0);
-        const pcmData = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
-        }
-        
-        const base64 = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
+      workletNode.current.port.onmessage = (e) => {
+        if (isMutedRef.current) return;
+        const base64 = arrayBufferToBase64(e.data);
         liveService.current?.sendAudio(base64);
       };
 
-      source.current.connect(processor.current);
-      processor.current.connect(audioContext.current.destination);
+      source.current.connect(workletNode.current);
+      // Connect to a muted gain node to ensure processing without echo
+      const gainNode = audioContext.current.createGain();
+      gainNode.gain.value = 0;
+      workletNode.current.connect(gainNode);
+      gainNode.connect(audioContext.current.destination);
       
       setIsSessionActive(true);
       setTranscript([]);
@@ -307,7 +335,7 @@ export default function App() {
 
   const stopSession = () => {
     liveService.current?.close();
-    processor.current?.disconnect();
+    workletNode.current?.disconnect();
     source.current?.disconnect();
     audioContext.current?.close();
     setIsSessionActive(false);

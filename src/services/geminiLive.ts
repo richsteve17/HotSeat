@@ -9,7 +9,7 @@ export interface LiveSessionConfig {
 
 export class GeminiLiveService {
   private ai: GoogleGenAI;
-  private session: any;
+  private session: Awaited<ReturnType<GoogleGenAI['live']['connect']>> | null = null;
 
   constructor() {
     this.ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
@@ -24,6 +24,8 @@ export class GeminiLiveService {
           voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
         },
         systemInstruction: config.systemInstruction,
+        inputAudioTranscription: {},
+        outputAudioTranscription: {},
       },
       callbacks: {
         onopen: () => console.log("Live session opened"),
